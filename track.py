@@ -503,6 +503,24 @@ def create_historical_dashboard(history):
         use_container_width=True
     )
 
+def calculate_month_over_month_change(current, previous):
+    """Calculate percentage change between current and previous month"""
+    if previous == 0:
+        return float('inf') if current > 0 else 0
+    return ((current - previous) / previous) * 100
+
+def format_currency(value):
+    """Format currency with proper styling"""
+    if value < 0:
+        return f'<span style="color:red">₦{abs(value):,.0f}</span>'
+    return f'₦{value:,.0f}'
+
+def format_percentage(value):
+    """Format percentage with proper styling"""
+    if value < 0:
+        return f'<span style="color:red">{value:.1f}%</span>'
+    return f'<span style="color:green">{value:.1f}%</span>'
+
 # ========================= MAIN APP =========================
 
 def main_app():
@@ -543,6 +561,13 @@ def main_app():
             padding-left: 20px;
             padding-right: 20px;
         }
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        .negative-value {
+            color: red !important;
+        }
         </style>
     """, unsafe_allow_html=True)
     
@@ -563,40 +588,167 @@ def main_app():
     if page == "📊 Dashboard":
         st.markdown('<p class="main-header">💰 Expense Tracker</p>', unsafe_allow_html=True)
         
-        # Quick stats from latest month
+        # Load history data
         history = load_history()
-        if history:
-            latest_month = max(history.keys())
-            latest_data = history[latest_month]
-            
-            st.markdown(f'<div class="month-badge">📅 Latest: {latest_month}</div>', unsafe_allow_html=True)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Spending", f"₦{latest_data['total']:,.0f}")
-            with col2:
-                st.metric("Budget Goal", f"₦{sum(GOALS.values()):,.0f}")
-            with col3:
-                savings = sum(GOALS.values()) - latest_data['total']
-                st.metric("Savings", f"₦{savings:,.0f}")
-            with col4:
-                st.metric("Transactions", latest_data['transaction_count'])
-            
-            # Category breakdown
-            st.markdown("### 📊 Category Breakdown")
-            cats = list(latest_data['categories'].keys())
-            values = list(latest_data['categories'].values())
-            
-            fig = go.Figure(data=[
-                go.Bar(name='Actual', x=cats, y=values,
-                      marker_color=[CATEGORY_COLORS.get(c, '#95a5a6') for c in cats]),
-                go.Bar(name='Goal', x=cats, y=[GOALS[c] for c in cats],
-                      marker_color='lightblue')
-            ])
-            fig.update_layout(barmode='group', title='Budget vs Actual')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
+        
+        if not history:
             st.info("No data available. Please upload a statement to get started.")
+        else:
+            # Get sorted months
+            sorted_months = sorted(history.keys(), 
+                                 key=lambda x: datetime.strptime(x, '%B %Y'), 
+                                 reverse=True)
+            
+            # Month selector
+            selected_month = st.selectbox("Select Month", sorted_months)
+            
+            if selected_month:
+                # Get data for selected month
+                current_data = history[selected_month]
+                
+                # Get previous month data if available
+                current_index = sorted_months.index(selected_month)
+                previous_month = sorted_months[current_index + 1] if current_index + 1 < len(sorted_months) else None
+                previous_data = history.get(previous_month, None) if previous_month else None
+                
+                # Display month badge
+                st.markdown(f'<div class="month-badge">📅 {selected_month}</div>', unsafe_allow_html=True)
+                
+                # Calculate metrics
+                total_spending = current_data['total']
+                goal_total = sum(GOALS.values())
+                savings = goal_total - total_spending
+                
+                # Calculate percentage of budget used
+                budget_percentage = (total_spending / goal_total) * 100 if goal_total > 0 else 0
+                
+                # Calculate month-over-month change
+                mom_change = 0
+                mom_change_str = "N/A"
+                if previous_data:
+                    mom_change = calculate_month_over_month_change(total_spending, previous_data['total'])
+                    if mom_change == float('inf'):
+                        mom_change_str = "∞%"
+                    else:
+                        mom_change_str = f"{mom_change:.1f}%"
+                
+                # Display metrics with styling
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.markdown(f'<div class="metric-value {"" if savings >= 0 else "negative-value"}">{format_currency(total_spending)}</div>', 
+                               unsafe_allow_html=True)
+                    st.markdown("Total Spending")
+                
+                with col2:
+                    st.markdown(f'<div class="metric-value">{format_currency(goal_total)}</div>', 
+                               unsafe_allow_html=True)
+                    st.markdown("Budget Goal")
+                
+                with col3:
+                    st.markdown(f'<div class="metric-value {"" if savings >= 0 else "negative-value"}">{format_currency(savings)}</div>', 
+                               unsafe_allow_html=True)
+                    st.markdown("Savings")
+                
+                with col4:
+                    st.markdown(f'<div class="metric-value">{budget_percentage:.1f}%</div>', 
+                               unsafe_allow_html=True)
+                    st.markdown("Budget Used")
+                
+                # Month-over-month change
+                if previous_data:
+                    st.markdown(f"### 📊 Month-over-Month Change: {format_percentage(mom_change)}")
+                
+                # Category breakdown with percentages
+                st.markdown("### 📊 Category Breakdown")
+                
+                # Create a dataframe for categories
+                categories = list(GOALS.keys())
+                actual_values = [current_data['categories'].get(cat, 0) for cat in categories]
+                goal_values = [GOALS[cat] for cat in categories]
+                percentages = [(actual / goal * 100) if goal > 0 else 0 for actual, goal in zip(actual_values, goal_values)]
+                
+                # Create a styled dataframe
+                df_categories = pd.DataFrame({
+                    'Category': categories,
+                    'Actual': actual_values,
+                    'Goal': goal_values,
+                    'Percentage': percentages
+                })
+                
+                # Format the dataframe for display
+                styled_df = df_categories.style.format({
+                    'Actual': lambda x: format_currency(x),
+                    'Goal': lambda x: format_currency(x),
+                    'Percentage': lambda x: f"{x:.1f}%"
+                }).applymap(lambda x: 'color: red' if x < 0 else '', subset=['Actual'])
+                
+                st.dataframe(styled_df, use_container_width=True)
+                
+                # Chart for budget vs actual
+                fig = go.Figure()
+                
+                # Add actual spending bars
+                fig.add_trace(go.Bar(
+                    name='Actual',
+                    x=categories,
+                    y=actual_values,
+                    marker_color=[CATEGORY_COLORS.get(cat, '#95a5a6') for cat in categories]
+                ))
+                
+                # Add goal bars
+                fig.add_trace(go.Bar(
+                    name='Goal',
+                    x=categories,
+                    y=goal_values,
+                    marker_color='lightblue'
+                ))
+                
+                fig.update_layout(
+                    title='Budget vs Actual by Category',
+                    barmode='group',
+                    yaxis=dict(title='Amount (₦)'),
+                    xaxis=dict(title='Category')
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Pie chart for spending distribution
+                fig = go.Figure(data=[go.Pie(
+                    labels=categories,
+                    values=actual_values,
+                    hole=0.4,
+                    marker_colors=[CATEGORY_COLORS.get(cat, '#95a5a6') for cat in categories]
+                )])
+                
+                fig.update_layout(title='Spending Distribution')
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Insights
+                st.markdown("### 💡 Key Insights")
+                
+                # Generate insights based on data
+                insights = []
+                
+                # Check overspent categories
+                overspent = [cat for cat in categories if actual_values[categories.index(cat)] > goal_values[categories.index(cat)]]
+                if overspent:
+                    insights.append(f"⚠️ Overspent in: {', '.join(overspent)}")
+                
+                # Check underspent categories
+                underspent = [cat for cat in categories if actual_values[categories.index(cat)] < goal_values[categories.index(cat)] * 0.8]
+                if underspent:
+                    insights.append(f"✅ Well under budget in: {', '.join(underspent)}")
+                
+                # Top spending category
+                top_category_idx = actual_values.index(max(actual_values))
+                insights.append(f"💸 Highest spending: {categories[top_category_idx]} ({format_currency(actual_values[top_category_idx])})")
+                
+                # Transaction count
+                insights.append(f"📊 {current_data['transaction_count']} transactions")
+                
+                # Display insights
+                for insight in insights:
+                    st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
     
     elif page == "📤 Upload Statement":
         st.markdown('<p class="main-header">📤 Upload Statement</p>', unsafe_allow_html=True)
