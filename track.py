@@ -17,6 +17,8 @@ import os
 import hashlib
 import base64
 from io import BytesIO
+import random
+import string
 
 # Suppress openpyxl warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -30,7 +32,7 @@ MAX_LOGIN_ATTEMPTS = 3
 SESSION_TIMEOUT = 3600  # 1 hour
 
 # Default credentials (will be replaced with user-provided ones)
-DEFAULT_USERNAME = "admin"
+DEFAULT_EMAIL = "admin@example.com"
 DEFAULT_PASSWORD_HASH = hashlib.sha256("admin123".encode()).hexdigest()
 
 GOALS = {
@@ -67,17 +69,19 @@ def load_credentials():
         else:
             # Create default credentials
             default_creds = {
-                "username": DEFAULT_USERNAME,
+                "email": DEFAULT_EMAIL,
                 "password_hash": DEFAULT_PASSWORD_HASH,
-                "created_at": datetime.now().isoformat()
+                "created_at": datetime.now().isoformat(),
+                "reset_tokens": {}
             }
             save_credentials(default_creds)
             return default_creds
     except:
         return {
-            "username": DEFAULT_USERNAME,
+            "email": DEFAULT_EMAIL,
             "password_hash": DEFAULT_PASSWORD_HASH,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "reset_tokens": {}
         }
 
 def save_credentials(credentials):
@@ -97,6 +101,15 @@ def hash_password(password):
 def verify_password(password, password_hash):
     """Verify password against hash"""
     return hash_password(password) == password_hash
+
+def is_valid_email(email):
+    """Check if email is valid"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def generate_reset_token():
+    """Generate a random reset token"""
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=20))
 
 def check_login():
     """Check if user is logged in"""
@@ -142,7 +155,7 @@ def login_page():
         st.markdown('<div class="login-container">', unsafe_allow_html=True)
         st.markdown('<h2 class="login-title">🔐 Login</h2>', unsafe_allow_html=True)
         
-        username = st.text_input("Username", key="login_username")
+        email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
         
         if st.button("Login", type="primary", use_container_width=True):
@@ -152,7 +165,7 @@ def login_page():
             
             credentials = load_credentials()
             
-            if username == credentials['username'] and verify_password(password, credentials['password_hash']):
+            if email == credentials['email'] and verify_password(password, credentials['password_hash']):
                 st.session_state['logged_in'] = True
                 st.session_state['login_time'] = datetime.now().timestamp()
                 st.session_state['login_attempts'] = 0
@@ -162,6 +175,134 @@ def login_page():
                 st.session_state['login_attempts'] = st.session_state.get('login_attempts', 0) + 1
                 remaining = MAX_LOGIN_ATTEMPTS - st.session_state['login_attempts']
                 st.error(f"Invalid credentials. {remaining} attempts remaining.")
+        
+        st.markdown('<div style="text-align: center; margin-top: 20px;">', unsafe_allow_html=True)
+        if st.button("Forgot Password?"):
+            st.session_state['show_reset'] = True
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Password reset section
+    if st.session_state.get('show_reset', False):
+        st.markdown("""
+            <style>
+            .reset-container {
+                max-width: 400px;
+                margin: 20px auto;
+                padding: 20px;
+                border-radius: 10px;
+                box-shadow: 0 0 20px rgba(0,0,0,0.1);
+                background: white;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown('<div class="reset-container">', unsafe_allow_html=True)
+            st.markdown('<h3 class="login-title">🔑 Reset Password</h3>', unsafe_allow_html=True)
+            
+            reset_email = st.text_input("Email", key="reset_email")
+            
+            if st.button("Send Reset Link", type="primary", use_container_width=True):
+                credentials = load_credentials()
+                
+                if reset_email == credentials['email']:
+                    # Generate reset token
+                    token = generate_reset_token()
+                    expiry = (datetime.now() + timedelta(hours=24)).isoformat()
+                    
+                    # Update credentials with reset token
+                    if 'reset_tokens' not in credentials:
+                        credentials['reset_tokens'] = {}
+                    credentials['reset_tokens'][token] = expiry
+                    
+                    save_credentials(credentials)
+                    
+                    # Display reset link (in a real app, this would be emailed)
+                    reset_url = f"?reset_token={token}"
+                    st.success(f"Reset link generated! In a real app, this would be emailed to {reset_email}.")
+                    st.code(reset_url)
+                    
+                    # For demo purposes, we'll show the token directly
+                    st.info(f"Your reset token is: {token}")
+                else:
+                    st.error("Email not found in our system.")
+            
+            if st.button("Back to Login"):
+                st.session_state['show_reset'] = False
+                st.rerun()
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+
+def reset_password_page():
+    """Display password reset page"""
+    query_params = st.experimental_get_query_params()
+    token = query_params.get('reset_token', [None])[0]
+    
+    if not token:
+        st.error("Invalid reset link.")
+        return
+    
+    credentials = load_credentials()
+    
+    if 'reset_tokens' not in credentials or token not in credentials['reset_tokens']:
+        st.error("Invalid or expired reset token.")
+        return
+    
+    # Check if token is expired
+    expiry = datetime.fromisoformat(credentials['reset_tokens'][token])
+    if datetime.now() > expiry:
+        st.error("Reset token has expired.")
+        return
+    
+    st.markdown("""
+        <style>
+        .reset-container {
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            background: white;
+        }
+        .reset-title {
+            font-size: 2rem;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 30px;
+            color: #667eea;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown('<div class="reset-container">', unsafe_allow_html=True)
+        st.markdown('<h2 class="reset-title">🔑 Reset Password</h2>', unsafe_allow_html=True)
+        
+        new_password = st.text_input("New Password", type="password", key="new_pass")
+        confirm_password = st.text_input("Confirm New Password", type="password", key="confirm_pass")
+        
+        if st.button("Reset Password", type="primary", use_container_width=True):
+            if new_password == confirm_password:
+                if len(new_password) >= 6:
+                    # Update password
+                    credentials['password_hash'] = hash_password(new_password)
+                    credentials['updated_at'] = datetime.now().isoformat()
+                    
+                    # Remove used token
+                    del credentials['reset_tokens'][token]
+                    
+                    save_credentials(credentials)
+                    st.success("Password reset successfully! Please login with your new password.")
+                    st.session_state['show_reset'] = False
+                    st.rerun()
+                else:
+                    st.error("Password must be at least 6 characters long.")
+            else:
+                st.error("Passwords do not match.")
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -173,25 +314,26 @@ def settings_page():
     
     with st.expander("🔐 Update Credentials"):
         current_password = st.text_input("Current Password", type="password", key="current_pass")
-        new_username = st.text_input("New Username", value=credentials['username'])
+        new_email = st.text_input("New Email", value=credentials['email'])
         new_password = st.text_input("New Password", type="password", key="new_pass")
         confirm_password = st.text_input("Confirm New Password", type="password", key="confirm_pass")
         
         if st.button("Update Credentials", type="primary"):
             if verify_password(current_password, credentials['password_hash']):
                 if new_password == confirm_password:
-                    if len(new_password) >= 6:
+                    if len(new_password) >= 6 and is_valid_email(new_email):
                         new_credentials = {
-                            "username": new_username,
+                            "email": new_email,
                             "password_hash": hash_password(new_password),
-                            "updated_at": datetime.now().isoformat()
+                            "updated_at": datetime.now().isoformat(),
+                            "reset_tokens": credentials.get('reset_tokens', {})
                         }
                         if save_credentials(new_credentials):
                             st.success("Credentials updated successfully!")
                             st.session_state['logged_in'] = False
                             st.rerun()
                     else:
-                        st.error("Password must be at least 6 characters long.")
+                        st.error("Password must be at least 6 characters long and email must be valid.")
                 else:
                     st.error("New passwords do not match.")
             else:
@@ -401,6 +543,39 @@ def prepare_historical_comparison(history):
     df = df.sort_values('SortDate').drop('SortDate', axis=1)
     return df
 
+def calculate_monthly_change(history, current_month, previous_month=None):
+    """Calculate percentage change between months"""
+    if not history or current_month not in history:
+        return None, None, None
+    
+    current_data = history[current_month]
+    
+    if not previous_month:
+        # Find the previous month in history
+        months = sorted(history.keys(), key=lambda x: datetime.strptime(x, '%B %Y'))
+        current_index = months.index(current_month)
+        if current_index > 0:
+            previous_month = months[current_index - 1]
+        else:
+            return None, None, None
+    
+    if previous_month not in history:
+        return None, None, None
+    
+    previous_data = history[previous_month]
+    
+    # Calculate percentage changes
+    total_change = ((current_data['total'] - previous_data['total']) / previous_data['total']) * 100 if previous_data['total'] > 0 else 0
+    
+    category_changes = {}
+    for cat in GOALS.keys():
+        current = current_data['categories'].get(cat, 0)
+        previous = previous_data['categories'].get(cat, 0)
+        change = ((current - previous) / previous) * 100 if previous > 0 else 0
+        category_changes[cat] = change
+    
+    return total_change, category_changes, previous_month
+
 def create_historical_dashboard(history):
     """Create comprehensive historical dashboard"""
     if not history:
@@ -543,6 +718,16 @@ def main_app():
             padding-left: 20px;
             padding-right: 20px;
         }
+        .metric-change {
+            font-size: 0.8rem;
+            color: #666;
+        }
+        .metric-up {
+            color: green;
+        }
+        .metric-down {
+            color: red;
+        }
         </style>
     """, unsafe_allow_html=True)
     
@@ -566,35 +751,85 @@ def main_app():
         # Quick stats from latest month
         history = load_history()
         if history:
-            latest_month = max(history.keys())
-            latest_data = history[latest_month]
+            # Month selector
+            months = sorted(history.keys(), key=lambda x: datetime.strptime(x, '%B %Y'), reverse=True)
+            selected_month = st.selectbox("Select Month", months)
             
-            st.markdown(f'<div class="month-badge">📅 Latest: {latest_month}</div>', unsafe_allow_html=True)
+            # Get data for selected month
+            month_data = history[selected_month]
             
+            # Calculate changes from previous month
+            total_change, category_changes, previous_month = calculate_monthly_change(history, selected_month)
+            
+            st.markdown(f'<div class="month-badge">📅 {selected_month}</div>', unsafe_allow_html=True)
+            
+            # Display metrics with percentage changes
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Spending", f"₦{latest_data['total']:,.0f}")
+                if total_change is not None:
+                    change_icon = "📈" if total_change > 0 else "📉"
+                    change_class = "metric-up" if total_change > 0 else "metric-down"
+                    st.markdown(f'<div class="metric-change {change_class}">{change_icon} {total_change:.1f}% from {previous_month}</div>', unsafe_allow_html=True)
+                st.metric("Total Spending", f"₦{month_data['total']:,.0f}")
+            
             with col2:
                 st.metric("Budget Goal", f"₦{sum(GOALS.values()):,.0f}")
+            
             with col3:
-                savings = sum(GOALS.values()) - latest_data['total']
+                savings = sum(GOALS.values()) - month_data['total']
                 st.metric("Savings", f"₦{savings:,.0f}")
+            
             with col4:
-                st.metric("Transactions", latest_data['transaction_count'])
+                st.metric("Transactions", month_data['transaction_count'])
             
-            # Category breakdown
+            # Category breakdown with changes
             st.markdown("### 📊 Category Breakdown")
-            cats = list(latest_data['categories'].keys())
-            values = list(latest_data['categories'].values())
+            cats = list(month_data['categories'].keys())
+            values = list(month_data['categories'].values())
             
-            fig = go.Figure(data=[
+            # Create subplot with two charts
+            fig = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=["Budget vs Actual", "Spending Distribution"],
+                specs=[[{"type": "bar"}, {"type": "pie"}]]
+            )
+            
+            # Bar chart
+            fig.add_trace(
                 go.Bar(name='Actual', x=cats, y=values,
                       marker_color=[CATEGORY_COLORS.get(c, '#95a5a6') for c in cats]),
+                row=1, col=1
+            )
+            fig.add_trace(
                 go.Bar(name='Goal', x=cats, y=[GOALS[c] for c in cats],
-                      marker_color='lightblue')
-            ])
-            fig.update_layout(barmode='group', title='Budget vs Actual')
+                      marker_color='lightblue'),
+                row=1, col=1
+            )
+            
+            # Pie chart
+            nz = [(c, month_data['categories'][c]) for c in cats if month_data['categories'][c] > 0]
+            if nz:
+                labels, values_pie = zip(*nz)
+                fig.add_trace(
+                    go.Pie(labels=labels, values=values_pie, hole=0.4,
+                         marker_colors=[CATEGORY_COLORS.get(c, '#95a5a6') for c in labels]),
+                    row=1, col=2
+                )
+            
+            fig.update_layout(barmode='group', height=500)
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Category metrics with changes
+            st.markdown("### 📈 Category Performance")
+            cat_cols = st.columns(3)
+            for i, cat in enumerate(cats):
+                with cat_cols[i % 3]:
+                    if category_changes and cat in category_changes:
+                        change = category_changes[cat]
+                        change_icon = "📈" if change > 0 else "📉"
+                        change_class = "metric-up" if change > 0 else "metric-down"
+                        st.markdown(f'<div class="metric-change {change_class}">{change_icon} {change:.1f}% from {previous_month}</div>', unsafe_allow_html=True)
+                    st.metric(cat, f"₦{month_data['categories'][cat]:,.0f}")
         else:
             st.info("No data available. Please upload a statement to get started.")
     
@@ -777,6 +1012,12 @@ def main():
         layout='wide',
         initial_sidebar_state='expanded'
     )
+    
+    # Check for reset token in URL
+    query_params = st.experimental_get_query_params()
+    if 'reset_token' in query_params:
+        reset_password_page()
+        return
     
     # Check authentication
     if not check_login():
