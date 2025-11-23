@@ -13,12 +13,25 @@ from plotly.subplots import make_subplots
 import json
 from pathlib import Path
 import warnings
-import os  # --- NEW: Import the os module ---
+import os
+import hashlib
+import base64
+from io import BytesIO
 
 # Suppress openpyxl warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # ========================= CONFIGURATION =========================
+
+# Security settings
+CREDENTIALS_FILE = "credentials.json"
+STORAGE_FILE = "spending_history.json"
+MAX_LOGIN_ATTEMPTS = 3
+SESSION_TIMEOUT = 3600  # 1 hour
+
+# Default credentials (will be replaced with user-provided ones)
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD_HASH = hashlib.sha256("admin123".encode()).hexdigest()
 
 GOALS = {
     "Data": 11000,
@@ -43,8 +56,171 @@ CATEGORY_COLORS = {
     "Miscellaneous": "#95a5a6"
 }
 
-# Storage file for historical data
-STORAGE_FILE = "spending_history.json"
+# ========================= AUTHENTICATION =========================
+
+def load_credentials():
+    """Load credentials from file or create default"""
+    try:
+        if Path(CREDENTIALS_FILE).exists():
+            with open(CREDENTIALS_FILE, 'r') as f:
+                return json.load(f)
+        else:
+            # Create default credentials
+            default_creds = {
+                "username": DEFAULT_USERNAME,
+                "password_hash": DEFAULT_PASSWORD_HASH,
+                "created_at": datetime.now().isoformat()
+            }
+            save_credentials(default_creds)
+            return default_creds
+    except:
+        return {
+            "username": DEFAULT_USERNAME,
+            "password_hash": DEFAULT_PASSWORD_HASH,
+            "created_at": datetime.now().isoformat()
+        }
+
+def save_credentials(credentials):
+    """Save credentials to file"""
+    try:
+        with open(CREDENTIALS_FILE, 'w') as f:
+            json.dump(credentials, f, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"Error saving credentials: {e}")
+        return False
+
+def hash_password(password):
+    """Hash password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password, password_hash):
+    """Verify password against hash"""
+    return hash_password(password) == password_hash
+
+def check_login():
+    """Check if user is logged in"""
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+        st.session_state['login_time'] = None
+        st.session_state['login_attempts'] = 0
+    
+    # Check session timeout
+    if st.session_state['logged_in'] and st.session_state['login_time']:
+        elapsed = datetime.now().timestamp() - st.session_state['login_time']
+        if elapsed > SESSION_TIMEOUT:
+            st.session_state['logged_in'] = False
+            st.session_state['login_time'] = None
+            st.warning("Session expired. Please login again.")
+    
+    return st.session_state['logged_in']
+
+def login_page():
+    """Display login page"""
+    st.markdown("""
+        <style>
+        .login-container {
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            background: white;
+        }
+        .login-title {
+            font-size: 2rem;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 30px;
+            color: #667eea;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown('<div class="login-container">', unsafe_allow_html=True)
+        st.markdown('<h2 class="login-title">🔐 Login</h2>', unsafe_allow_html=True)
+        
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        
+        if st.button("Login", type="primary", use_container_width=True):
+            if st.session_state.get('login_attempts', 0) >= MAX_LOGIN_ATTEMPTS:
+                st.error("Too many failed attempts. Please restart the app.")
+                st.stop()
+            
+            credentials = load_credentials()
+            
+            if username == credentials['username'] and verify_password(password, credentials['password_hash']):
+                st.session_state['logged_in'] = True
+                st.session_state['login_time'] = datetime.now().timestamp()
+                st.session_state['login_attempts'] = 0
+                st.success("Login successful!")
+                st.rerun()
+            else:
+                st.session_state['login_attempts'] = st.session_state.get('login_attempts', 0) + 1
+                remaining = MAX_LOGIN_ATTEMPTS - st.session_state['login_attempts']
+                st.error(f"Invalid credentials. {remaining} attempts remaining.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def settings_page():
+    """Settings page for updating credentials"""
+    st.markdown("### ⚙️ Settings")
+    
+    credentials = load_credentials()
+    
+    with st.expander("🔐 Update Credentials"):
+        current_password = st.text_input("Current Password", type="password", key="current_pass")
+        new_username = st.text_input("New Username", value=credentials['username'])
+        new_password = st.text_input("New Password", type="password", key="new_pass")
+        confirm_password = st.text_input("Confirm New Password", type="password", key="confirm_pass")
+        
+        if st.button("Update Credentials", type="primary"):
+            if verify_password(current_password, credentials['password_hash']):
+                if new_password == confirm_password:
+                    if len(new_password) >= 6:
+                        new_credentials = {
+                            "username": new_username,
+                            "password_hash": hash_password(new_password),
+                            "updated_at": datetime.now().isoformat()
+                        }
+                        if save_credentials(new_credentials):
+                            st.success("Credentials updated successfully!")
+                            st.session_state['logged_in'] = False
+                            st.rerun()
+                    else:
+                        st.error("Password must be at least 6 characters long.")
+                else:
+                    st.error("New passwords do not match.")
+            else:
+                st.error("Current password is incorrect.")
+    
+    with st.expander("🗑️ Data Management"):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Clear History", type="secondary"):
+                if st.session_state.get('confirm_clear_history', False):
+                    if clear_history():
+                        st.success("History cleared successfully!")
+                        st.session_state['confirm_clear_history'] = False
+                        st.rerun()
+                else:
+                    st.session_state['confirm_clear_history'] = True
+                    st.warning("Click again to confirm clearing all history.")
+        
+        with col2:
+            if st.button("Export Data", type="secondary"):
+                history = load_history()
+                if history:
+                    json_str = json.dumps(history, indent=2)
+                    st.download_button(
+                        label="Download History JSON",
+                        data=json_str,
+                        file_name=f"spending_history_{datetime.now().strftime('%Y%m%d')}.json",
+                        mime="application/json"
+                    )
 
 # ========================= STORAGE FUNCTIONS =========================
 
@@ -74,7 +250,6 @@ def add_month_to_history(month_key, data):
     history[month_key] = data
     return save_history(history)
 
-# --- NEW: Function to clear history ---
 def clear_history():
     """Clear the historical spending data file"""
     if Path(STORAGE_FILE).exists():
@@ -95,11 +270,10 @@ def try_parse_date(s):
         if len(parts) == 3 and len(parts[0]) == 4 and len(parts[1]) == 2 and len(parts[2]) == 2:
             try:
                 year, day, month = int(parts[0]), int(parts[1]), int(parts[2])
-                # Validate day and month values
                 if 1 <= day <= 31 and 1 <= month <= 12:
                     return datetime(year, month, day)
             except ValueError:
-                pass  # Fall through to other parsing methods
+                pass
     
     # Try common date formats
     try:
@@ -137,21 +311,15 @@ def is_debit_transaction(transaction_ref):
 
 def detect_statement_month(df, date_col):
     """Detect the statement month based on transaction dates (24th to 23rd cycle)"""
-    # Get all valid dates
     valid_dates = df[date_col].dropna()
     if len(valid_dates) == 0:
         return None
     
-    # Find the latest date in the statement
     latest_date = valid_dates.max()
     
-    # If the latest date is between 24th-31st, the statement is for the NEXT month
-    # If the latest date is between 1st-23rd, the statement is for the CURRENT month
     if latest_date.day >= 24:
-        # Statement is for next month
         target_date = latest_date + relativedelta(months=1)
     else:
-        # Statement is for current month
         target_date = latest_date
     
     return target_date.strftime('%B %Y')
@@ -196,7 +364,6 @@ def calculate_spending_patterns(df, date_col):
 def generate_insights(period_df, summary, total_debit):
     insights = []
     
-    # Goal adherence
     overspent = [cat for cat in GOALS if summary[cat] > GOALS[cat]]
     if overspent:
         insights.append(f"⚠️ Overspent in: {', '.join(overspent)}")
@@ -230,403 +397,392 @@ def prepare_historical_comparison(history):
         df_list.append(row)
     
     df = pd.DataFrame(df_list)
-    # Sort by date
     df['SortDate'] = pd.to_datetime(df['Month'], format='%B %Y')
     df = df.sort_values('SortDate').drop('SortDate', axis=1)
     return df
 
-# ========================= STREAMLIT UI =========================
-
-st.set_page_config(
-    page_title='Expense Tracker',
-    page_icon='💰',
-    layout='wide',
-    initial_sidebar_state='collapsed'
-)
-
-# Custom CSS
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
-    }
-    .month-badge {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #667eea;
-        padding: 1rem;
-        background: #f0f2f6;
-        border-radius: 10px;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    .insight-box {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #667eea;
-        margin: 0.5rem 0;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        padding-left: 20px;
-        padding-right: 20px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-st.markdown('<p class="main-header">💰 Expense Tracker</p>', unsafe_allow_html=True)
-
-# ========================= FILE UPLOAD =========================
-
-uploaded_file = st.file_uploader('📤 Upload Your Bank Statement', type=['xls', 'xlsx'], help='Upload your exported statement from 24th to 23rd')
-
-if uploaded_file is None:
-    col1, col2, col3 = st.columns([1,2,1])
+def create_historical_dashboard(history):
+    """Create comprehensive historical dashboard"""
+    if not history:
+        st.info("No historical data available")
+        return
+    
+    hist_df = prepare_historical_comparison(history)
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Months Tracked", len(history))
     with col2:
-        st.info('👆 Upload your monthly bank statement to get started')
+        avg_spend = hist_df['Total'].mean()
+        st.metric("Avg Monthly Spend", f"₦{avg_spend:,.0f}")
+    with col3:
+        total_spend = hist_df['Total'].sum()
+        st.metric("Total Tracked", f"₦{total_spend:,.0f}")
+    with col4:
+        trend = "📈" if hist_df['Total'].iloc[-1] > hist_df['Total'].iloc[0] else "📉"
+        st.metric("Trend", trend)
+    
+    # Spending trend chart
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=hist_df['Month'],
+        y=hist_df['Total'],
+        mode='lines+markers',
+        name='Monthly Spending',
+        line=dict(color='#667eea', width=3),
+        marker=dict(size=8)
+    ))
+    fig.add_hline(y=sum(GOALS.values()), line_dash="dash", line_color="red", 
+                  annotation_text="Monthly Goal")
+    fig.update_layout(title="Monthly Spending Trend", height=400)
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Category trends
+    st.markdown("### 📊 Category Trends Over Time")
+    category_cols = [c for c in hist_df.columns if c in GOALS.keys()]
+    
+    if category_cols:
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=category_cols[:4],
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}]]
+        )
         
-        # Show historical data if available
+        for i, cat in enumerate(category_cols[:4]):
+            row = (i // 2) + 1
+            col = (i % 2) + 1
+            fig.add_trace(
+                go.Scatter(
+                    x=hist_df['Month'],
+                    y=hist_df[cat],
+                    name=cat,
+                    mode='lines+markers',
+                    line=dict(color=CATEGORY_COLORS.get(cat, '#95a5a6'))
+                ),
+                row=row, col=col
+            )
+            fig.add_hline(
+                y=GOALS[cat], line_dash="dot", 
+                line_color="gray", row=row, col=col
+            )
+        
+        fig.update_layout(height=600, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Year-over-Year comparison
+    st.markdown("### 📅 Year-over-Year Comparison")
+    
+    # Extract year from month
+    hist_df['Year'] = pd.to_datetime(hist_df['Month'], format='%B %Y').dt.year
+    hist_df['Month_Name'] = pd.to_datetime(hist_df['Month'], format='%B %Y').dt.month_name()
+    
+    yearly_data = hist_df.groupby('Year')['Total'].sum().reset_index()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        fig = px.bar(yearly_data, x='Year', y='Total', title="Annual Spending")
+        fig.update_traces(marker_color='#764ba2')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Month-over-month comparison
+        month_comparison = hist_df.pivot(index='Month_Name', columns='Year', values='Total').fillna(0)
+        fig = px.imshow(month_comparison.T, title="Monthly Heatmap by Year",
+                       labels=dict(x="Month", y="Year", color="Spending"))
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Detailed table
+    st.markdown("### 📋 Detailed Monthly Breakdown")
+    st.dataframe(
+        hist_df.set_index('Month').style.format({
+            'Total': '₦{:,.0f}',
+            **{cat: '₦{:,.0f}' for cat in GOALS.keys()}
+        }),
+        use_container_width=True
+    )
+
+# ========================= MAIN APP =========================
+
+def main_app():
+    """Main application after login"""
+    # Custom CSS
+    st.markdown("""
+        <style>
+        .main-header {
+            font-size: 3rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        .month-badge {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #667eea;
+            padding: 1rem;
+            background: #f0f2f6;
+            border-radius: 10px;
+            text-align: center;
+            margin: 1rem 0;
+        }
+        .insight-box {
+            background-color: #f0f2f6;
+            padding: 1rem;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            margin: 0.5rem 0;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            padding-left: 20px;
+            padding-right: 20px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar navigation
+    with st.sidebar:
+        st.markdown("### 🧭 Navigation")
+        page = st.radio(
+            "Select Page",
+            ["📊 Dashboard", "📤 Upload Statement", "📚 Historical Analysis", "⚙️ Settings", "🚪 Logout"]
+        )
+        
+        if page == "🚪 Logout":
+            st.session_state['logged_in'] = False
+            st.session_state['login_time'] = None
+            st.rerun()
+    
+    # Page content
+    if page == "📊 Dashboard":
+        st.markdown('<p class="main-header">💰 Expense Tracker</p>', unsafe_allow_html=True)
+        
+        # Quick stats from latest month
         history = load_history()
         if history:
-            st.markdown('### 📚 Historical Data Available')
-            st.write(f"You have {len(history)} month(s) of data stored")
+            latest_month = max(history.keys())
+            latest_data = history[latest_month]
             
-            # --- NEW: Add Clear History Button ---
-            col_hist1, col_hist2, col_hist3 = st.columns([1, 2, 1])
-            with col_hist2:
-                if st.button('🗑️ Clear All History', type='secondary'):
-                    if st.session_state.get('confirm_clear', False):
-                        if clear_history():
-                            st.success('✅ History cleared successfully!')
-                            st.session_state['confirm_clear'] = False
-                            st.rerun()
-                        else:
-                            st.error('❌ No history file found to clear.')
-                    else:
-                        st.session_state['confirm_clear'] = True
-                        st.warning('⚠️ Are you sure? Click the button again to confirm.')
+            st.markdown(f'<div class="month-badge">📅 Latest: {latest_month}</div>', unsafe_allow_html=True)
             
-            if st.button('📊 View Historical Analysis', type='primary'):
-                st.session_state['show_history'] = True
-                st.rerun()
-        
-else:
-    try:
-        # Load and process data
-        with st.spinner('🔄 Analyzing your statement...'):
-            # Try multiple approaches to read the Excel file
-            try:
-                # First try with openpyxl
-                df = pd.read_excel(uploaded_file, header=7, dtype=str, engine='openpyxl')
-            except (ValueError, Exception) as e:
-                if "vertical" in str(e).lower():
-                    # If it's a vertical alignment issue, try with xlrd
-                    try:
-                        df = pd.read_excel(uploaded_file, header=7, dtype=str, engine='xlrd')
-                    except:
-                        # If xlrd doesn't work, try to read with openpyxl but ignore styling
-                        import openpyxl
-                        wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
-                        df = pd.read_excel(wb, header=7, dtype=str)
-                else:
-                    raise e
-            
-            df = normalize_columns(df)
-            
-            # Infer columns
-            date_col = infer_column(df, ['date', 'transaction date', 'value date']) or list(df.columns)[0]
-            narration_col = infer_column(df, ['narration', 'description']) or 'Narration'
-            transaction_ref_col = infer_column(df, ['transaction ref', 'ref', 'reference']) or 'Transaction Ref'
-            debit_col = infer_column(df, ['settlement debit', 'debit']) or None
-            alt_col = infer_column(df, ['transaction amount', 'amount']) or None
-            
-            # Parse dates
-            df[date_col] = df[date_col].apply(try_parse_date)
-            df['DateOnly'] = df[date_col].dt.date
-            df['TimeAMPM'] = df[date_col].dt.strftime('%I:%M:%S %p')
-            
-            # Detect statement month
-            statement_month = detect_statement_month(df, date_col)
-            
-            if statement_month is None:
-                st.error('❌ Could not detect statement month. Please check date format.')
-                st.stop()
-            
-            st.markdown(f'<div class="month-badge">📅 {statement_month}</div>', unsafe_allow_html=True)
-            
-            # Filter for DEBIT transactions only
-            if transaction_ref_col in df.columns:
-                df['IsDebit'] = df[transaction_ref_col].apply(is_debit_transaction)
-                period_df = df[df['IsDebit'] == True].copy()
-            else:
-                st.warning('⚠️ Transaction Ref column not found - analyzing all transactions')
-                period_df = df.copy()
-            
-            if len(period_df) == 0:
-                st.error('❌ No DEBIT transactions found in this statement')
-                st.stop()
-            
-            # Classify transactions
-            if narration_col not in period_df.columns:
-                period_df['Narration'] = ''
-                narration_col = 'Narration'
-            
-            period_df['Category'] = period_df[narration_col].apply(classify_row)
-            
-            # Extract amounts
-            prefer_amount_cols = [c for c in [debit_col, alt_col] if c is not None]
-            period_df['AmountRaw'] = period_df.apply(lambda r: extract_amount_from_row(r, prefer_amount_cols), axis=1)
-            period_df['AmountOut'] = period_df['AmountRaw'].apply(lambda x: abs(x) if pd.notna(x) else 0.0)
-            period_df = period_df[period_df['AmountOut'] > 0].copy()
-            
-            # Calculate metrics
-            summary = period_df.groupby('Category', as_index=True)['AmountOut'].sum().reindex(list(GOALS.keys()), fill_value=0.0)
-            total_debit = period_df['AmountOut'].sum()
-            goal_total = sum(GOALS.values())
-            
-            # Generate insights
-            insights = generate_insights(period_df, summary, total_debit)
-            
-            # Save to history
-            month_data = {
-                'total': float(total_debit),
-                'goal': float(goal_total),
-                'categories': {k: float(v) for k, v in summary.items()},
-                'transaction_count': len(period_df),
-                'date_processed': datetime.now().isoformat()
-            }
-            add_month_to_history(statement_month, month_data)
-            
-        # ========================= DASHBOARD =========================
-        
-        st.markdown('---')
-        
-        # Key Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric('Total Spending', f'₦{total_debit:,.0f}', 
-                     delta=f'{((total_debit/goal_total - 1) * 100):.1f}% vs goal',
-                     delta_color='inverse')
-        with col2:
-            st.metric('Budget Goal', f'₦{goal_total:,.0f}')
-        with col3:
-            st.metric('Transactions', f'{len(period_df):,}')
-        with col4:
-            savings = goal_total - total_debit
-            st.metric('Net Position', f'₦{savings:,.0f}',
-                     delta='Under budget ✅' if savings > 0 else 'Over budget ❌',
-                     delta_color='normal' if savings > 0 else 'inverse')
-        
-        # Insights
-        st.markdown('### 💡 Key Insights')
-        cols = st.columns(2)
-        for i, insight in enumerate(insights):
-            with cols[i % 2]:
-                st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
-        
-        # ========================= TABS =========================
-        
-        st.markdown('---')
-        
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['📊 Overview', '📅 Daily Trends', '🏪 Top Merchants', '⏰ Spending Patterns', '📋 Transactions', '📈 Historical'])
-        
-        with tab1:
-            col1, col2 = st.columns(2)
-            
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                # Budget vs Actual
-                fig = go.Figure()
-                cats = list(summary.index)
-                fig.add_trace(go.Bar(name='Goal', x=cats, y=[GOALS[c] for c in cats], 
-                                    marker_color='lightblue'))
-                fig.add_trace(go.Bar(name='Actual', x=cats, y=[summary[c] for c in cats],
-                                    marker_color=[CATEGORY_COLORS.get(c, '#95a5a6') for c in cats]))
-                fig.update_layout(title='Budget vs Actual by Category', barmode='group', height=400)
-                st.plotly_chart(fig, use_container_width=True)
-            
+                st.metric("Total Spending", f"₦{latest_data['total']:,.0f}")
             with col2:
-                # Pie chart
-                nz = [(c, summary[c]) for c in cats if summary[c] > 0]
-                if nz:
-                    labels, values = zip(*nz)
-                    fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4,
-                                                 marker_colors=[CATEGORY_COLORS.get(c, '#95a5a6') for c in labels])])
-                    fig.update_layout(title='Spending Distribution', height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                st.metric("Budget Goal", f"₦{sum(GOALS.values()):,.0f}")
+            with col3:
+                savings = sum(GOALS.values()) - latest_data['total']
+                st.metric("Savings", f"₦{savings:,.0f}")
+            with col4:
+                st.metric("Transactions", latest_data['transaction_count'])
             
-            # Progress bars
-            st.markdown('#### 🎯 Category Progress')
-            for cat in cats:
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    progress = summary[cat] / GOALS[cat] if GOALS[cat] > 0 else 0
-                    st.progress(min(progress, 1.0))
-                with col2:
-                    st.caption(f'₦{summary[cat]:,.0f} / ₦{GOALS[cat]:,.0f}')
-        
-        with tab2:
-            # Daily spending trend
-            daily_spending = calculate_daily_spending(period_df, date_col)
+            # Category breakdown
+            st.markdown("### 📊 Category Breakdown")
+            cats = list(latest_data['categories'].keys())
+            values = list(latest_data['categories'].values())
             
-            col1, col2 = st.columns(2)
-            with col1:
-                fig = px.line(daily_spending, x='Date', y='Amount', title='Daily Spending Trend',
-                             markers=True)
-                fig.update_traces(line_color='#667eea', line_width=3)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Cumulative spending
-                daily_spending['Cumulative'] = daily_spending['Amount'].cumsum()
-                fig = px.area(daily_spending, x='Date', y='Cumulative', title='Cumulative Spending')
-                fig.update_traces(fillcolor='rgba(102, 126, 234, 0.3)', line_color='#667eea')
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with tab3:
-            # Top merchants
-            merchant_data = find_top_merchants(period_df, narration_col, top_n=15)
-            fig = go.Figure(go.Bar(
-                x=merchant_data['sum'],
-                y=merchant_data.index,
-                orientation='h',
-                marker_color='#764ba2'
-            ))
-            fig.update_layout(title='Top 15 Merchants by Spending', height=500, yaxis={'categoryorder':'total ascending'})
+            fig = go.Figure(data=[
+                go.Bar(name='Actual', x=cats, y=values,
+                      marker_color=[CATEGORY_COLORS.get(c, '#95a5a6') for c in cats]),
+                go.Bar(name='Goal', x=cats, y=[GOALS[c] for c in cats],
+                      marker_color='lightblue')
+            ])
+            fig.update_layout(barmode='group', title='Budget vs Actual')
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No data available. Please upload a statement to get started.")
+    
+    elif page == "📤 Upload Statement":
+        st.markdown('<p class="main-header">📤 Upload Statement</p>', unsafe_allow_html=True)
         
-        with tab4:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Day of week pattern
-                dow_spending, hour_spending = calculate_spending_patterns(period_df, date_col)
-                fig = px.bar(x=dow_spending.index, y=dow_spending.values, 
-                            title='Spending by Day of Week',
-                            labels={'x': 'Day', 'y': 'Amount (NGN)'})
-                fig.update_traces(marker_color='#2ecc71')
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Hour of day pattern
-                fig = px.line(x=hour_spending.index, y=hour_spending.values,
-                             title='Spending by Hour of Day',
-                             labels={'x': 'Hour', 'y': 'Amount (NGN)'},
-                             markers=True)
-                fig.update_traces(line_color='#e74c3c', line_width=3)
-                st.plotly_chart(fig, use_container_width=True)
+        uploaded_file = st.file_uploader(
+            'Upload Your Bank Statement',
+            type=['xls', 'xlsx'],
+            help='Upload your exported statement from 24th to 23rd'
+        )
         
-        with tab5:
-            # Transaction details
-            st.markdown('#### 📋 Transaction Details')
-            
-            # Filters
-            col1, col2 = st.columns(2)
-            with col1:
-                cat_filter = st.multiselect('Filter by category', options=['All'] + list(cats), default=['All'])
-            with col2:
-                search = st.text_input('🔍 Search narration', '')
-            
-            # Apply filters
-            filtered_df = period_df.copy()
-            if 'All' not in cat_filter and cat_filter:
-                filtered_df = filtered_df[filtered_df['Category'].isin(cat_filter)]
-            if search:
-                filtered_df = filtered_df[filtered_df[narration_col].str.contains(search, case=False, na=False)]
-            
-            # Display
-            display_cols = [date_col, 'DateOnly', 'TimeAMPM', narration_col, 'Category', 'AmountOut']
-            display_cols = [c for c in display_cols if c in filtered_df.columns]
-            
-            st.dataframe(
-                filtered_df[display_cols].sort_values(by=date_col, ascending=False).reset_index(drop=True),
-                use_container_width=True,
-                height=400
-            )
-            
-            # Download button
-            csv_buf = filtered_df.to_csv(index=False).encode('utf-8')
-            st.download_button('📥 Download CSV', data=csv_buf, 
-                             file_name=f'transactions_{statement_month.replace(" ", "_")}.csv',
-                             mime='text/csv')
-        
-        with tab6:
-            # Historical comparison
-            st.markdown('#### 📈 Historical Trends')
-            
-            history = load_history()
-            if len(history) < 2:
-                st.info('💡 Upload more months to see historical trends')
-            else:
-                hist_df = prepare_historical_comparison(history)
+        if uploaded_file is not None:
+            try:
+                with st.spinner('🔄 Analyzing your statement...'):
+                    # Process file (same as original code)
+                    try:
+                        df = pd.read_excel(uploaded_file, header=7, dtype=str, engine='openpyxl')
+                    except (ValueError, Exception) as e:
+                        if "vertical" in str(e).lower():
+                            try:
+                                df = pd.read_excel(uploaded_file, header=7, dtype=str, engine='xlrd')
+                            except:
+                                import openpyxl
+                                wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+                                df = pd.read_excel(wb, header=7, dtype=str)
+                        else:
+                            raise e
+                    
+                    df = normalize_columns(df)
+                    
+                    # Infer columns
+                    date_col = infer_column(df, ['date', 'transaction date', 'value date']) or list(df.columns)[0]
+                    narration_col = infer_column(df, ['narration', 'description']) or 'Narration'
+                    transaction_ref_col = infer_column(df, ['transaction ref', 'ref', 'reference']) or 'Transaction Ref'
+                    debit_col = infer_column(df, ['settlement debit', 'debit']) or None
+                    alt_col = infer_column(df, ['transaction amount', 'amount']) or None
+                    
+                    # Parse dates
+                    df[date_col] = df[date_col].apply(try_parse_date)
+                    df['DateOnly'] = df[date_col].dt.date
+                    df['TimeAMPM'] = df[date_col].dt.strftime('%I:%M:%S %p')
+                    
+                    # Detect statement month
+                    statement_month = detect_statement_month(df, date_col)
+                    
+                    if statement_month is None:
+                        st.error('❌ Could not detect statement month. Please check date format.')
+                        st.stop()
+                    
+                    st.markdown(f'<div class="month-badge">📅 {statement_month}</div>', unsafe_allow_html=True)
+                    
+                    # Filter for DEBIT transactions
+                    if transaction_ref_col in df.columns:
+                        df['IsDebit'] = df[transaction_ref_col].apply(is_debit_transaction)
+                        period_df = df[df['IsDebit'] == True].copy()
+                    else:
+                        st.warning('⚠️ Transaction Ref column not found - analyzing all transactions')
+                        period_df = df.copy()
+                    
+                    if len(period_df) == 0:
+                        st.error('❌ No DEBIT transactions found in this statement')
+                        st.stop()
+                    
+                    # Classify transactions
+                    if narration_col not in period_df.columns:
+                        period_df['Narration'] = ''
+                        narration_col = 'Narration'
+                    
+                    period_df['Category'] = period_df[narration_col].apply(classify_row)
+                    
+                    # Extract amounts
+                    prefer_amount_cols = [c for c in [debit_col, alt_col] if c is not None]
+                    period_df['AmountRaw'] = period_df.apply(lambda r: extract_amount_from_row(r, prefer_amount_cols), axis=1)
+                    period_df['AmountOut'] = period_df['AmountRaw'].apply(lambda x: abs(x) if pd.notna(x) else 0.0)
+                    period_df = period_df[period_df['AmountOut'] > 0].copy()
+                    
+                    # Calculate metrics
+                    summary = period_df.groupby('Category', as_index=True)['AmountOut'].sum().reindex(list(GOALS.keys()), fill_value=0.0)
+                    total_debit = period_df['AmountOut'].sum()
+                    goal_total = sum(GOALS.values())
+                    
+                    # Generate insights
+                    insights = generate_insights(period_df, summary, total_debit)
+                    
+                    # Save to history
+                    month_data = {
+                        'total': float(total_debit),
+                        'goal': float(goal_total),
+                        'categories': {k: float(v) for k, v in summary.items()},
+                        'transaction_count': len(period_df),
+                        'date_processed': datetime.now().isoformat()
+                    }
+                    add_month_to_history(statement_month, month_data)
                 
-                # Total spending trend
-                fig = px.line(hist_df, x='Month', y='Total', title='Monthly Spending Trend',
-                             markers=True, line_shape='spline')
-                fig.update_traces(line_color='#667eea', line_width=3)
-                fig.add_hline(y=goal_total, line_dash="dash", line_color="red", 
-             annotation=dict(text="Monthly Goal"))
-                st.plotly_chart(fig, use_container_width=True)
+                # Display results
+                st.success(f'✅ {statement_month} analysis complete and saved to history!')
                 
-                # Category comparison
-                category_cols = [c for c in hist_df.columns if c in GOALS.keys()]
-                if category_cols:
-                    fig = go.Figure()
-                    for cat in category_cols:
-                        fig.add_trace(go.Scatter(
-                            x=hist_df['Month'], y=hist_df[cat],
-                            name=cat, mode='lines+markers',
-                            line=dict(width=2, color=CATEGORY_COLORS.get(cat, '#95a5a6'))
-                        ))
-                    fig.update_layout(title='Category Trends Over Time', height=400)
+                # Key metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric('Total Spending', f'₦{total_debit:,.0f}')
+                with col2:
+                    st.metric('Budget Goal', f'₦{goal_total:,.0f}')
+                with col3:
+                    st.metric('Transactions', f'{len(period_df):,}')
+                with col4:
+                    savings = goal_total - total_debit
+                    st.metric('Net Position', f'₦{savings:,.0f}')
+                
+                # Insights
+                st.markdown('### 💡 Key Insights')
+                for insight in insights:
+                    st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
+                
+                # Charts
+                tab1, tab2, tab3 = st.tabs(['📊 Overview', '📅 Daily Trends', '🏪 Top Merchants'])
+                
+                with tab1:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        fig = go.Figure()
+                        cats = list(summary.index)
+                        fig.add_trace(go.Bar(name='Goal', x=cats, y=[GOALS[c] for c in cats], 
+                                            marker_color='lightblue'))
+                        fig.add_trace(go.Bar(name='Actual', x=cats, y=[summary[c] for c in cats],
+                                            marker_color=[CATEGORY_COLORS.get(c, '#95a5a6') for c in cats]))
+                        fig.update_layout(title='Budget vs Actual', barmode='group')
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        nz = [(c, summary[c]) for c in cats if summary[c] > 0]
+                        if nz:
+                            labels, values = zip(*nz)
+                            fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4,
+                                                         marker_colors=[CATEGORY_COLORS.get(c, '#95a5a6') for c in labels])])
+                            fig.update_layout(title='Spending Distribution')
+                            st.plotly_chart(fig, use_container_width=True)
+                
+                with tab2:
+                    daily_spending = calculate_daily_spending(period_df, date_col)
+                    fig = px.line(daily_spending, x='Date', y='Amount', title='Daily Spending Trend')
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Summary table
-                st.markdown('#### 📊 Historical Summary')
-                st.dataframe(hist_df.set_index('Month'), use_container_width=True)
+                with tab3:
+                    merchant_data = find_top_merchants(period_df, narration_col)
+                    fig = go.Figure(go.Bar(
+                        x=merchant_data['sum'],
+                        y=merchant_data.index,
+                        orientation='h',
+                        marker_color='#764ba2'
+                    ))
+                    fig.update_layout(title='Top Merchants')
+                    st.plotly_chart(fig, use_container_width=True)
+                
+            except Exception as e:
+                st.error(f'❌ Error processing file: {str(e)}')
+                st.exception(e)
+    
+    elif page == "📚 Historical Analysis":
+        st.markdown('<p class="main-header">📚 Historical Analysis</p>', unsafe_allow_html=True)
         
-        st.success(f'✅ {statement_month} analysis complete and saved to history!')
-        
-    except Exception as e:
-        st.error(f'❌ Error processing file: {str(e)}')
-        st.exception(e)
+        history = load_history()
+        if not history:
+            st.info("No historical data available. Upload statements to build your history.")
+        else:
+            create_historical_dashboard(history)
+    
+    elif page == "⚙️ Settings":
+        settings_page()
 
-# Show history view if requested
-if 'show_history' in st.session_state and st.session_state['show_history'] and uploaded_file is None:
-    history = load_history()
-    if history:
-        st.markdown('### 📚 Historical Overview')
-        hist_df = prepare_historical_comparison(history)
-        
-        # Overview metrics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            total_months = len(history)
-            st.metric('Months Tracked', total_months)
-        with col2:
-            avg_spending = hist_df['Total'].mean()
-            st.metric('Average Monthly Spend', f'₦{avg_spending:,.0f}')
-        with col3:
-            total_spent = hist_df['Total'].sum()
-            st.metric('Total Tracked', f'₦{total_spent:,.0f}')
-        
-        # Charts
-        fig = px.line(hist_df, x='Month', y='Total', markers=True, title='All-Time Spending Trend')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.dataframe(hist_df.set_index('Month'), use_container_width=True)
-        
-        if st.button('← Back to Upload'):
-            del st.session_state['show_history']
-            st.rerun()
+# ========================= MAIN EXECUTION =========================
 
-# Footer
-st.markdown('---')
+def main():
+    """Main execution function"""
+    # Configure page
+    st.set_page_config(
+        page_title='Expense Tracker',
+        page_icon='💰',
+        layout='wide',
+        initial_sidebar_state='expanded'
+    )
+    
+    # Check authentication
+    if not check_login():
+        login_page()
+    else:
+        main_app()
+
+if __name__ == "__main__":
+    main()
